@@ -1,0 +1,246 @@
+Okay, here is a README.md file documenting the improved MemoryManager module.
+
+# Agent Memory Foundation: MemoryManager Module
+
+This module provides a reusable and comprehensive memory system for AI agents, incorporating multiple layers of memory management: Working Memory, Short-Term Memory (STM), and Long-Term Memory (LTM) based on semantic search.
+
+## Features
+
+*   **Multi-Layered Memory:**
+    *   **Working Memory:** Transient key-value store for current task context and scratchpad data.
+    *   **Short-Term Memory (STM):** Fixed-size deque (`collections.deque`) storing recent interaction history (e.g., user/assistant turns). Optionally persistent to a JSON file.
+    *   **Long-Term Memory (LTM):** Persistent storage using a vector database ([ChromaDB](https://docs.trychroma.com/)) for semantically searchable information. Uses [Sentence Transformers](https://www.sbert.net/) for text embedding generation.
+*   **Semantic Search:** Retrieve relevant information from LTM based on the meaning of a query, not just keywords.
+*   **Persistence:** Optionally save/load STM history. LTM is inherently persistent via ChromaDB's file storage.
+*   **Context Aggregation:** Helper methods (`get_context_for_prompt`, `format_context_for_llm`) to easily gather relevant information from all memory types for use in LLM prompts.
+*   **Batch Operations:** Efficiently add multiple documents to LTM at once (`add_many_to_long_term`).
+*   **LTM Management:** Delete specific items from LTM by ID or metadata filter (`delete_from_long_term`), or clear the entire LTM collection (`clear_long_term_memory`).
+*   **Configurable:** Customize STM size, LTM collection name, embedding model, persistence paths, and logging level.
+*   **Robustness:** Includes error handling and logging (`logging` module) for better diagnostics.
+*   **Type Hinting:** Fully type-hinted for improved developer experience and static analysis.
+
+## Requirements
+
+*   Python 3.8+
+*   Required Libraries:
+    *   `chromadb`
+    *   `sentence-transformers`
+    *   `numpy` (usually installed as a dependency)
+
+Install dependencies using pip:
+
+```bash
+pip install chromadb sentence-transformers numpy # Or include torch/tensorflow depending on your backend for sentence-transformers
+
+
+Note: The first time you run code using sentence-transformers, it will download the specified embedding model (all-MiniLM-L6-v2 by default) which may take some time and requires an internet connection.
+
+Usage
+1. Initialization
+
+Import and instantiate the MemoryManager. Provide paths for persistent storage.
+
+import logging
+from memory_manager import MemoryManager # Assuming the code is in memory_manager.py
+
+# Configure paths and settings
+ltm_db_path = "my_agent_ltm_db"
+stm_file_path = "my_agent_stm_history.json"
+ltm_collection = "agent_knowledge"
+
+memory = MemoryManager(
+    vector_db_path=ltm_db_path,
+    stm_persistence_path=stm_file_path,
+    ltm_collection_name=ltm_collection,
+    stm_max_turns=15, # Optional: Override default STM size
+    log_level=logging.INFO # Optional: Set logging verbosity
+)
+IGNORE_WHEN_COPYING_START
+content_copy
+download
+Use code with caution.
+Python
+IGNORE_WHEN_COPYING_END
+2. Interacting with Memory Layers
+
+Working Memory: Store temporary data relevant to the current task.
+
+memory.set_working("current_goal", "Find information about photosynthesis.")
+goal = memory.get_working("current_goal")
+all_wm = memory.get_all_working()
+memory.clear_working("current_goal") # Clear specific key
+memory.clear_working() # Clear all
+IGNORE_WHEN_COPYING_START
+content_copy
+download
+Use code with caution.
+Python
+IGNORE_WHEN_COPYING_END
+
+Short-Term Memory: Log conversation turns.
+
+memory.add_interaction(role="user", content="What is photosynthesis?")
+memory.add_interaction(role="assistant", content="Photosynthesis is the process used by plants...")
+history = memory.get_short_term_history(n=5) # Get last 5 turns
+memory.clear_short_term_history()
+IGNORE_WHEN_COPYING_START
+content_copy
+download
+Use code with caution.
+Python
+IGNORE_WHEN_COPYING_END
+
+Long-Term Memory: Add important facts, summaries, or distilled knowledge. Search for relevant information.
+
+# Add single item
+memory.add_to_long_term(
+    text_content="Photosynthesis converts light energy into chemical energy.",
+    metadata={"source": "summary", "topic": "biology"}
+)
+
+# Add multiple items efficiently
+facts = ["Chlorophyll absorbs sunlight.", "Oxygen is a byproduct of photosynthesis."]
+metas = [{"topic": "biology"}, {"topic": "biology"}]
+memory.add_many_to_long_term(facts, metas)
+
+# Search LTM
+query = "What does chlorophyll do?"
+results = memory.search_long_term(query, top_k=3)
+# results is a list of dicts: [{'id': ..., 'document': ..., 'distance': ..., 'metadata': ...}]
+
+# Delete from LTM
+memory.delete_from_long_term(ids=["some_doc_id_to_remove"])
+memory.delete_from_long_term(where_filter={"topic": "outdated_topic"})
+
+# Clear all LTM (Use with caution!)
+# memory.clear_long_term_memory(are_you_sure=True)
+IGNORE_WHEN_COPYING_START
+content_copy
+download
+Use code with caution.
+Python
+IGNORE_WHEN_COPYING_END
+3. Generating Context for Prompts
+
+Combine information from different memory layers to provide context to an LLM.
+
+user_query = "How is energy stored during photosynthesis?"
+
+# 1. Get context data from all relevant memory layers
+context_data = memory.get_context_for_prompt(
+    current_query=user_query, # Used for LTM search
+    stm_turns=10,            # Include last 10 conversation turns
+    ltm_results=5            # Retrieve top 5 relevant LTM entries
+)
+
+# 2. Format the context data into a string suitable for an LLM prompt
+formatted_context = memory.format_context_for_llm(
+    context_data,
+    include_working=True,
+    include_ltm=True,
+    include_stm=True
+)
+
+# 3. Construct the full prompt
+full_prompt = f"""
+{formatted_context}
+
+--- Current Conversation ---
+User: {user_query}
+Assistant: 
+"""
+
+print(full_prompt)
+# Now, send full_prompt to your Language Model
+IGNORE_WHEN_COPYING_START
+content_copy
+download
+Use code with caution.
+Python
+IGNORE_WHEN_COPYING_END
+API Documentation (Key Methods)
+
+Refer to the source code docstrings and type hints for full details.
+
+__init__(...): Initializes the manager. Key parameters: stm_max_turns, ltm_collection_name, embedding_model_name, vector_db_path, stm_persistence_path, log_level.
+
+set_working(key, value) / get_working(key, default) / clear_working(key=None): Manage Working Memory.
+
+add_interaction(role, content, timestamp=None): Add a turn to STM.
+
+get_short_term_history(n=None): Retrieve recent STM turns.
+
+clear_short_term_history(): Clear STM.
+
+add_to_long_term(text_content, metadata=None, doc_id=None): Add a single item to LTM.
+
+add_many_to_long_term(texts, metadatas=None, ids=None): Add multiple items to LTM efficiently.
+
+search_long_term(query_text, top_k=5, filter_metadata=None): Perform semantic search on LTM.
+
+delete_from_long_term(ids=None, where_filter=None): Delete items from LTM by ID or filter.
+
+clear_long_term_memory(are_you_sure=False): Irreversibly delete the LTM collection. Requires confirmation.
+
+get_context_for_prompt(current_query=None, stm_turns=5, ltm_results=3): Gathers context data from memory layers.
+
+format_context_for_llm(context_dict, ...): Formats the gathered context into a string for LLM prompts.
+
+Testing & Debugging
+
+Run Built-in Example: Execute the script directly to run the if __name__ == "__main__": block. This demonstrates initialization and usage of all key features.
+
+python memory_manager.py
+IGNORE_WHEN_COPYING_START
+content_copy
+download
+Use code with caution.
+Bash
+IGNORE_WHEN_COPYING_END
+
+Check Log Output: The module uses Python's logging. Check the console output for INFO, WARNING, ERROR, and DEBUG messages. Increase verbosity during initialization for more detail:
+
+memory = MemoryManager(..., log_level=logging.DEBUG)
+IGNORE_WHEN_COPYING_START
+content_copy
+download
+Use code with caution.
+Python
+IGNORE_WHEN_COPYING_END
+
+Inspect Persistent Files:
+
+LTM: Check the directory specified by vector_db_path (e.g., my_agent_ltm_db). ChromaDB stores its datafiles there. Direct inspection is complex, but presence/modification indicates activity.
+
+STM: If stm_persistence_path is set (e.g., my_agent_stm_history.json), inspect this JSON file to see the saved conversation history deque.
+
+Isolate LTM Issues: Ensure chromadb and sentence-transformers are correctly installed. Check for errors during initialization related to model loading or database connection. Verify the embedding model (all-MiniLM-L6-v2 by default) exists or is downloadable.
+
+Unit Tests: For more rigorous testing, consider writing unit tests using unittest or pytest, potentially mocking chromadb and sentence_transformers interactions to test the MemoryManager logic in isolation.
+
+Configuration Defaults
+
+stm_max_turns: 10
+
+ltm_collection_name: "agent_long_term_memory"
+
+embedding_model_name: 'all-MiniLM-L6-v2'
+
+vector_db_path: "memory_vector_db"
+
+stm_persistence_path: None (STM not persistent by default)
+
+log_level: logging.INFO
+
+Future Enhancements (Ideas)
+
+Asynchronous LTM operations (add/search) for non-blocking behavior in agents.
+
+Integration points for explicit memory distillation/summarization steps.
+
+Support for swapping vector databases or embedding models via configuration.
+
+Memory pruning or time-decay mechanisms for LTM.
+
+More sophisticated metadata structures and filtering options.
+
