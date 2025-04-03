@@ -1,259 +1,222 @@
 // --- Constants and Configuration ---
 ZOTERO_API_KEY = getUserInput("Enter Zotero API Key") // Or load from secure config
 ZOTERO_USER_ID = getUserInput("Enter Zotero User/Group ID") // Or load from config
+GOOGLE_API_KEY = getUserInput("Enter Google AI API Key") // LOAD SECURELY!
 LOCAL_ZOTERO_STORAGE_PATH = getUserInput("Path to Zotero local storage/PDFs") // Or detect
 CACHE_DIRECTORY = "./.zotero_agent_cache/"
 VECTOR_STORE_PATH = CACHE_DIRECTORY + "vector_store"
-SELECTED_GPU = detectOrSelectGPU() // Logic to choose RTX 4060 if available, else 2060
+SELECTED_GPU = detectOrSelectGPU() // Still useful for local embeddings, QA, summarization if kept local
 
 // --- Initialization ---
 Function initialize():
     createDirectoryIfNotExists(CACHE_DIRECTORY)
     zotero = initializeZoteroClient(ZOTERO_API_KEY, ZOTERO_USER_ID)
     
-    // Load models onto GPU (adjust model names based on VRAM and desired quality)
-    // Use libraries like Hugging Face transformers, sentence-transformers
-    embedding_model = loadEmbeddingModel("all-mpnet-base-v2", device=SELECTED_GPU) // Good general model
-    summarizer_model = loadSummarizationModel("facebook/bart-large-cnn", device=SELECTED_GPU) // Good quality summarizer
-    qa_model = loadQuestionAnsweringModel("deepset/roberta-base-squad2", device=SELECTED_GPU) // QA model
-    // Consider NER model like scispaCy if needed (might be CPU-bound or require specific GPU setup)
-    ner_model = loadNerModel("en_core_sci_lg") // Example scispaCy model
+    // Initialize Google Generative AI Client
+    google_ai_client = initializeGoogleAIClient(GOOGLE_API_KEY)
+    // Specify Gemini model (e.g., 'gemini-1.5-flash' for speed/cost or 'gemini-pro' for capability)
+    gemini_model_name = "gemini-1.5-flash" 
 
-    // Load Local LLM (using llama-cpp-python, ctransformers, ollama etc. with GPU offloading)
-    // Choose model based on VRAM (e.g., Mistral-7B-Instruct-v0.2-GGUF with Q4_K_M quantization for 8GB VRAM)
-    local_llm = loadLocalLLM("path/to/quantized_model.gguf", gpu_layers=-1) // Offload all layers to GPU if possible
+    // Load models for LOCAL processing (GPU acceleration useful here)
+    embedding_model = loadEmbeddingModel("all-mpnet-base-v2", device=SELECTED_GPU) // For local retrieval
+    // Keep local summarizer/QA optional, or rely on Gemini for these tasks too via specific prompts?
+    // Decision Point: Keep local models for speed on single docs, or use Gemini for everything?
+    // Let's assume we keep local embedding for RAG retrieval speed and control.
+    // Summarizer/QA could be replaced by specific Gemini calls if desired.
+    // summarizer_model = loadSummarizationModel("facebook/bart-large-cnn", device=SELECTED_GPU) // Optional local
+    // qa_model = loadQuestionAnsweringModel("deepset/roberta-base-squad2", device=SELECTED_GPU) // Optional local
+    ner_model = loadNerModel("en_core_sci_lg") // spaCy NER likely still useful locally
 
     // Initialize or load vector store (FAISS, ChromaDB)
     vector_store = initializeVectorStore(VECTOR_STORE_PATH, embedding_model.dimension)
 
-    // Load cache index (e.g., a dictionary mapping item_key to cached data paths/status)
+    // Load cache index
     cache_index = loadCacheIndex(CACHE_DIRECTORY + "cache_index.json")
 
-    print("Initialization Complete.")
-    return zotero, embedding_model, summarizer_model, qa_model, ner_model, local_llm, vector_store, cache_index
+    print("Initialization Complete. Using Google Gemini API for generation.")
+    # REMINDER: Inform user about potential API costs and data privacy (sending text snippets to Google).
+    print("WARNING: Text snippets will be sent to Google Gemini API for analysis.")
 
-// --- Core Data Structures ---
-// cache_index: Dict[item_key, {"metadata": timestamp, "pdf_path": path, "extracted_text_path": path, "summary_path": path, "embeddings_path": path, "ner_results_path": path}]
-// paper_data: Dict[item_key, {"metadata": {...}, "pdf_path": "...", "text": "...", "summary": "...", "entities": [...], "chunks": [...]}] // In-memory representation for active use
+    return zotero, google_ai_client, gemini_model_name, embedding_model, /*summarizer_model, qa_model,*/ ner_model, vector_store, cache_index
 
-// --- Zotero Interaction ---
-Function getCollections(zotero_client):
-    collections = zotero_client.collections()
-    return collections // List of collection names/IDs
 
-Function getCollectionItems(zotero_client, collection_id):
-    items_metadata = zotero_client.collection_items(collection_id)
-    // Enhance metadata: try to find local PDF path based on Zotero data structure / linked attachments
-    for item in items_metadata:
-        item['local_pdf_path'] = findLocalPdfPath(item, LOCAL_ZOTERO_STORAGE_PATH)
-        item['item_key'] = item['key'] // Use Zotero item key as unique ID
-    return items_metadata // List of dicts with metadata and potential PDF path
+// --- Core Data Structures (remain similar) ---
+// cache_index: Dict[item_key, {...}]
+// paper_data: Dict[item_key, {...}]
 
-// --- Caching ---
-Function checkCache(item_key, data_type, cache_index): // data_type e.g., "text", "summary", "embeddings"
-    if item_key in cache_index and data_type + "_path" in cache_index[item_key]:
-        return loadDataFromCacheFile(cache_index[item_key][data_type + "_path"])
-    return None
+// --- Zotero Interaction (remains the same) ---
+Function getCollections(zotero_client): pass
+Function getCollectionItems(zotero_client, collection_id): pass
 
-Function saveToCache(item_key, data_type, data, cache_index):
-    filepath = CACHE_DIRECTORY + item_key + "_" + data_type + ".cache"
-    saveDataToCacheFile(data, filepath)
-    if item_key not in cache_index: cache_index[item_key] = {}
-    cache_index[item_key][data_type + "_path"] = filepath
-    saveCacheIndex(cache_index, CACHE_DIRECTORY + "cache_index.json")
+// --- Caching (remains the same) ---
+Function checkCache(item_key, data_type, cache_index): pass
+Function saveToCache(item_key, data_type, data, cache_index): pass
 
-// --- PDF Processing ---
-Function extractTextFromPDF(pdf_path):
-    if not pdf_path or not fileExists(pdf_path): return None
-    try:
-        text = usePyMuPDF(pdf_path) // Or other PDF library
-        // Basic cleaning (remove headers/footers, weird line breaks) could go here
-        // Check for OCR necessity if text is too short/garbled? (Advanced)
-        // if needsOCR(text): text = runOCR(pdf_path) // Optional, Tesseract
-        return text
-    except Exception as e:
-        print(f"Error processing PDF {pdf_path}: {e}")
-        return None
+// --- PDF Processing (remains the same) ---
+Function extractTextFromPDF(pdf_path): pass
 
-// --- NLP Analysis (GPU Accelerated) ---
-Function generateEmbeddings(text_chunks, embedding_model, batch_size=32):
-    // Use sentence-transformers library with GPU
-    embeddings = embedding_model.encode(text_chunks, batch_size=batch_size, show_progress_bar=True, device=SELECTED_GPU)
-    return embeddings
+// --- LOCAL NLP Analysis (Embeddings, maybe NER) ---
+Function generateEmbeddings(text_chunks, embedding_model, batch_size=32): pass // Uses local GPU
+Function extractEntities(text, ner_model): pass // Uses local spaCy
+Function chunkText(text, strategy='paragraph', chunk_size=500): pass
 
-Function summarizeText(text, summarizer_model, max_length=250, min_length=50):
-    // Use Hugging Face pipeline with GPU
-    summary = summarizer_model(text, max_length=max_length, min_length=min_length, truncation=True)[0]['summary_text']
-    return summary
-
-Function extractEntities(text, ner_model):
-    // Use spaCy (may run mostly on CPU unless using specific GPU libraries like spacy-transformers)
-    doc = ner_model(text)
-    entities = [(ent.text, ent.label_) for ent in doc.ents]
-    return entities
-
-Function answerQuestion(question, context, qa_model):
-    // Use Hugging Face pipeline with GPU
-    result = qa_model(question=question, context=context)
-    return result['answer'] // Potentially return score as well
-
-Function chunkText(text, strategy='paragraph', chunk_size=500): // strategy='sentence', 'fixed_size' etc.
-    // Simple splitting logic
-    chunks = splitTextIntoChunks(text, strategy, chunk_size)
-    return chunks
-
-// --- Core Processing Pipeline ---
+// --- Core Processing Pipeline (remains similar, focuses on local tasks) ---
 Function processPaper(item_metadata, cache_index, force_reprocess=False):
-    item_key = item_metadata['item_key']
-    processed_data = {"metadata": item_metadata}
-
-    // 1. Get PDF Path
-    processed_data["pdf_path"] = item_metadata.get('local_pdf_path')
-
-    // 2. Extract Text (Cache Check)
-    cached_text = checkCache(item_key, "extracted_text", cache_index)
-    if cached_text and not force_reprocess:
-        processed_data["text"] = cached_text
-    else:
-        extracted_text = extractTextFromPDF(processed_data["pdf_path"])
-        if extracted_text:
-            processed_data["text"] = extracted_text
-            saveToCache(item_key, "extracted_text", extracted_text, cache_index)
-        else:
-            processed_data["text"] = None // Mark as failed/no text
-
-    // 3. Generate Summary (Optional, On-demand or batch, Cache Check)
-    // Could be triggered later by specific requests
-
-    // 4. Chunk Text (if text exists)
-    if processed_data["text"]:
-        processed_data["chunks"] = chunkText(processed_data["text"])
-    else:
-        processed_data["chunks"] = []
-
-    // 5. Generate Embeddings (if chunks exist, Cache Check)
+    // ... (steps 1-4: get PDF path, extract text, chunk text - remain the same) ...
+    
+    // 5. Generate Embeddings locally (if chunks exist, Cache Check)
     cached_embeddings = checkCache(item_key, "embeddings", cache_index)
     if cached_embeddings and not force_reprocess:
         processed_data["embeddings"] = cached_embeddings
-        // Add to vector store if not already there (requires tracking state)
         addEmbeddingsToVectorStore(vector_store, item_key, processed_data["chunks"], cached_embeddings)
     elif processed_data["chunks"]:
-        embeddings = generateEmbeddings(processed_data["chunks"], embedding_model)
+        embeddings = generateEmbeddings(processed_data["chunks"], embedding_model) // Local GPU
         processed_data["embeddings"] = embeddings
         saveToCache(item_key, "embeddings", embeddings, cache_index)
-        // Add to vector store
         addEmbeddingsToVectorStore(vector_store, item_key, processed_data["chunks"], embeddings)
 
-    // 6. NER Extraction (Optional, On-demand, Cache Check)
-    // Could be triggered later
+    // 6. NER Extraction (Optional, On-demand, Local)
+    // ...
 
     return processed_data
 
-// --- Vector Store Operations ---
-Function addEmbeddingsToVectorStore(vector_store, item_key, chunks, embeddings):
-    // Add embeddings with metadata (item_key, chunk_index, chunk_text)
-    vector_store.add(embeddings, metadatas=[{"item_key": item_key, "chunk_idx": i, "text": chunk} for i, chunk in enumerate(chunks)])
 
-Function searchVectorStore(query, vector_store, embedding_model, top_k=5):
-    query_embedding = generateEmbeddings([query], embedding_model)[0]
-    results = vector_store.search(query_embedding, k=top_k) // Returns indices/distances + metadata
-    return results // List of relevant chunks with metadata
+// --- Vector Store Operations (remain the same) ---
+Function addEmbeddingsToVectorStore(vector_store, item_key, chunks, embeddings): pass
+Function searchVectorStore(query, vector_store, embedding_model, top_k=5): pass
 
-// --- RAG for Discussion/Inference ---
-Function performRAG(query, vector_store, embedding_model, local_llm, top_k=5):
-    // 1. Retrieve relevant chunks
+// --- RAG using Google Gemini API ---
+Function performRAGWithGemini(query, vector_store, embedding_model, google_ai_client, gemini_model_name, top_k=5):
+    // 1. Retrieve relevant chunks LOCALLY
+    print("Retrieving relevant context locally...")
     retrieved_chunks_metadata = searchVectorStore(query, vector_store, embedding_model, top_k=top_k)
-    context = "\n".join([chunk_meta['text'] for chunk_meta in retrieved_chunks_metadata])
+    if not retrieved_chunks_metadata:
+        return "Could not find relevant information in the processed documents.", []
+
+    context = "\n---\n".join([f"Source: {chunk_meta['item_key']}, Chunk: {chunk_meta['text']}" for chunk_meta in retrieved_chunks_metadata])
     source_keys = list(set([chunk_meta['item_key'] for chunk_meta in retrieved_chunks_metadata]))
 
-    // 2. Build Prompt
-    prompt = f"""Based on the following excerpts from research papers ({', '.join(source_keys)}):
+    // 2. Build Prompt for Gemini
+    # Consider safety settings and instruction tuning
+    prompt = f"""You are a scientific research assistant. Analyze the following context extracted from research papers ({', '.join(source_keys)}) and answer the user's query based *only* on this context. Do not use external knowledge. Cite the source paper key(s) relevant to your answer. If the context doesn't provide the answer, state that clearly.
+
 --- Context Start ---
 {context}
 --- Context End ---
 
 User Query: {query}
 
-Answer the user's query drawing *only* from the provided context. Be concise and cite the source paper keys if possible. If the context doesn't contain the answer, state that clearly.
 Answer:"""
 
-    // 3. Generate Response using Local LLM (GPU accelerated)
-    response = local_llm.generate(prompt, max_tokens=500) // Adjust parameters
+    // 3. Call Google Gemini API
+    print(f"Sending request to Google Gemini ({gemini_model_name})...")
+    # !! PRIVACY WARNING: 'prompt' containing text snippets is sent externally !!
+    try:
+        gemini_model = google_ai_client.GenerativeModel(gemini_model_name)
+        # Configure safety settings if needed
+        # response = gemini_model.generate_content(prompt, safety_settings=...) 
+        response = gemini_model.generate_content(prompt) 
+        
+        # Basic error checking/content filtering check
+        if not response.candidates or not response.candidates[0].content.parts:
+             # Handle cases where the API blocked the response or returned empty
+             error_reason = response.prompt_feedback if response.prompt_feedback else "Unknown reason (possibly content filtering or API error)"
+             print(f"Gemini API Error/Block: {error_reason}")
+             return f"Failed to get response from Gemini API. Reason: {error_reason}", source_keys
+             
+        generated_text = response.text # Accessing the text part directly
 
-    return response, source_keys
+    except Exception as e:
+        print(f"Error calling Google Gemini API: {e}")
+        return f"Error communicating with Gemini API: {e}", source_keys
 
-// --- Report Generation ---
-Function generatePDFReport(data, template_name, output_path):
-    // Use Jinja2 to render data into an HTML/Markdown template
-    html_content = renderTemplate(template_name, data)
-    // Use WeasyPrint or ReportLab to convert HTML/Markdown to PDF
-    convertHtmlToPdf(html_content, output_path)
-    print(f"Report generated: {output_path}")
+    print("Received response from Gemini.")
+    return generated_text, source_keys
 
-// --- Main Interaction Loop (Simplified) ---
+// --- Specific Task Functions (Optionally using Gemini) ---
+Function summarizeWithGemini(text, google_ai_client, gemini_model_name, item_key="Unknown"):
+    prompt = f"""Summarize the key findings and conclusions from the following text excerpt from paper {item_key}. Be concise and accurate.
+
+Text:
+{text}
+
+Summary:"""
+    print(f"Sending summary request to Gemini for {item_key}...")
+    # Call Gemini API similar to performRAGWithGemini
+    try:
+        gemini_model = google_ai_client.GenerativeModel(gemini_model_name)
+        response = gemini_model.generate_content(prompt)
+        if not response.candidates or not response.candidates[0].content.parts:
+             error_reason = response.prompt_feedback if response.prompt_feedback else "Unknown reason"
+             return f"Failed to get summary from Gemini API. Reason: {error_reason}"
+        return response.text
+    except Exception as e:
+        return f"Error communicating with Gemini API for summary: {e}"
+
+
+Function extractWithGemini(text, extraction_query, google_ai_client, gemini_model_name, item_key="Unknown"):
+    prompt = f"""From the following text excerpt from paper {item_key}, extract the information relevant to the query: '{extraction_query}'. List the key points or provide a concise answer based *only* on the text.
+
+Text:
+{text}
+
+Relevant Information for '{extraction_query}':"""
+    print(f"Sending extraction request to Gemini for {item_key}...")
+    # Call Gemini API similar to performRAGWithGemini
+    try:
+        gemini_model = google_ai_client.GenerativeModel(gemini_model_name)
+        response = gemini_model.generate_content(prompt)
+        if not response.candidates or not response.candidates[0].content.parts:
+             error_reason = response.prompt_feedback if response.prompt_feedback else "Unknown reason"
+             return f"Failed to get extraction from Gemini API. Reason: {error_reason}"
+        return response.text
+    except Exception as e:
+        return f"Error communicating with Gemini API for extraction: {e}"
+
+// --- Report Generation (remains the same conceptually) ---
+Function generatePDFReport(data, template_name, output_path): pass
+
+// --- Main Interaction Loop (Updated Calls) ---
 Function main():
-    zotero, embedding_model, summarizer_model, qa_model, ner_model, local_llm, vector_store, cache_index = initialize()
-    active_collection_items = [] // List of full paper_data dicts for the selected collection
+    // Initialize with Gemini client instead of local LLM
+    zotero, google_ai_client, gemini_model_name, embedding_model, /*optional models,*/ ner_model, vector_store, cache_index = initialize()
+    active_collection_items = [] 
 
     while True:
-        displayInterface() // Show collections, active papers, chat history
-        user_input = getUserInput("> ") // From GUI or CLI
+        displayInterface() 
+        user_input = getUserInput("> ") 
 
-        if user_input.command == "list_collections":
-            collections = getCollections(zotero)
-            displayCollections(collections)
-
-        elif user_input.command == "select_collection":
-            collection_id = user_input.collection_id
-            print(f"Loading collection {collection_id}...")
-            metadata_list = getCollectionItems(zotero, collection_id)
-            active_collection_items = []
-            print(f"Processing {len(metadata_list)} items (checking cache)...")
-            for item_meta in metadata_list:
-                // Pre-process basic info or trigger full processing later
-                processed_data = processPaper(item_meta, cache_index) // At least get text and maybe embeddings
-                active_collection_items.append(processed_data)
-            print("Collection loaded. Embeddings indexed (if available/generated).")
-            displayItemList(active_collection_items)
-
-        elif user_input.command == "process_pdfs": // Explicitly trigger full PDF text/embedding
-            target_items = selectItemsFromList(active_collection_items, user_input.item_keys_or_all)
-            print(f"Processing PDFs for {len(target_items)} items...")
-            for item_data in target_items:
-                 // Force re-processing might be needed if only metadata was loaded initially
-                 processPaper(item_data['metadata'], cache_index, force_reprocess=True)
-            print("PDF processing complete.")
+        // ... (list_collections, select_collection, process_pdfs remain similar, using local processing) ...
 
         elif user_input.command == "summarize":
             target_items = selectItemsFromList(active_collection_items, user_input.item_keys_or_all)
             summaries = {}
             for item_data in target_items:
                 item_key = item_data['metadata']['item_key']
-                cached_summary = checkCache(item_key, "summary", cache_index)
+                cached_summary = checkCache(item_key, "summary_gemini", cache_index) # Use different cache key?
                 if cached_summary:
                     summaries[item_key] = cached_summary
                 elif item_data.get("text"):
-                    print(f"Generating summary for {item_key}...")
-                    summary = summarizeText(item_data["text"], summarizer_model)
+                    # Use Gemini for summarization
+                    summary = summarizeWithGemini(item_data["text"], google_ai_client, gemini_model_name, item_key)
                     summaries[item_key] = summary
-                    saveToCache(item_key, "summary", summary, cache_index)
+                    # Decide whether/how to cache API results (cost vs computation)
+                    saveToCache(item_key, "summary_gemini", summary, cache_index) 
                 else:
                     summaries[item_key] = "Error: No text available to summarize."
             displaySummaries(summaries)
 
         elif user_input.command == "extract_methods" or user_input.command == "extract_findings":
-             target_items = selectItemsFromList(active_collection_items, user_input.item_keys) # Usually specific items
+             target_items = selectItemsFromList(active_collection_items, user_input.item_keys) 
              extracted_info = {}
-             question = "What methods were used?" if user_input.command == "extract_methods" else "What were the key findings?"
+             extraction_query = "What methods were used?" if user_input.command == "extract_methods" else "What were the key findings reported?"
              for item_data in target_items:
                  item_key = item_data['metadata']['item_key']
                  if item_data.get("text"):
-                     print(f"Extracting '{question}' from {item_key}...")
-                     # Option 1: Simple section extraction (less accurate)
-                     # methods_text = findSection(item_data['text'], "Methods")
-                     # Option 2: QA model (potentially better)
-                     answer = answerQuestion(question, item_data["text"], qa_model)
+                     # Use Gemini for extraction
+                     answer = extractWithGemini(item_data["text"], extraction_query, google_ai_client, gemini_model_name, item_key)
                      extracted_info[item_key] = answer
+                     # Cache API result?
                  else:
                      extracted_info[item_key] = "Error: No text available."
              displayExtractionResults(extracted_info)
@@ -263,51 +226,30 @@ Function main():
             if not vector_store or vector_store.isEmpty():
                  print("Error: No papers processed and indexed for discussion. Please process PDFs first.")
                  continue
-            print(f"Searching and generating response for: '{query}'...")
-            response, sources = performRAG(query, vector_store, embedding_model, local_llm)
-            displayDiscussion(query, response, sources)
+            # Use RAG with Gemini
+            response, sources = performRAGWithGemini(query, vector_store, embedding_model, google_ai_client, gemini_model_name)
+            displayDiscussion(query, response, sources) # Display API response
 
         elif user_input.command == "generate_report":
-            report_type = user_input.report_type // e.g., "prisma_summary", "method_comparison"
-            target_items = selectItemsFromList(active_collection_items, user_input.item_keys_or_all)
-            report_data = prepareReportData(report_type, target_items, cache_index) // Gathers summaries, extractions etc.
-            output_filename = f"Report_{report_type}_{user_input.collection_id}.pdf"
-            generatePDFReport(report_data, f"template_{report_type}.html", output_filename)
+             report_type = user_input.report_type 
+             target_items = selectItemsFromList(active_collection_items, user_input.item_keys_or_all)
+             # Report data preparation might involve calling Gemini functions if summaries/extractions weren't cached
+             report_data = prepareReportData(report_type, target_items, cache_index, google_ai_client, gemini_model_name) 
+             output_filename = f"Report_{report_type}_{user_input.collection_id}.pdf"
+             generatePDFReport(report_data, f"template_{report_type}.html", output_filename)
 
         elif user_input.command == "exit":
             break
-
         else:
             print("Unknown command.")
 
     print("Exiting Zotero Agent.")
 
-// --- Helper Functions (Placeholders) ---
-Function initializeZoteroClient(key, id): pass
-Function findLocalPdfPath(item_meta, base_path): pass // Needs logic for Zotero's structure
-Function loadCacheIndex(path): pass
-Function saveCacheIndex(index, path): pass
-Function loadDataFromCacheFile(path): pass
-Function saveDataToCacheFile(data, path): pass
-Function usePyMuPDF(path): pass
-Function splitTextIntoChunks(text, strategy, size): pass
-Function initializeVectorStore(path, dim): pass // e.g., FAISS index init
-Function loadEmbeddingModel(name, device): pass // HuggingFace sentence-transformers
-Function loadSummarizationModel(name, device): pass // HuggingFace pipeline
-Function loadQuestionAnsweringModel(name, device): pass // HuggingFace pipeline
-Function loadNerModel(name): pass // spaCy load
-Function loadLocalLLM(path, gpu_layers): pass // llama-cpp-python or similar
-Function renderTemplate(template_name, data): pass // Jinja2
-Function convertHtmlToPdf(html, path): pass // WeasyPrint or other
-Function displayInterface(): pass // GUI/CLI updates
-Function getUserInput(prompt): pass // GUI/CLI interaction
-Function displayCollections(collections): pass
-Function displayItemList(items): pass
-Function displaySummaries(summaries): pass
-Function displayExtractionResults(results): pass
-Function displayDiscussion(query, response, sources): pass
-Function selectItemsFromList(items, selection_rule): pass // Logic for selecting items based on input
-Function prepareReportData(report_type, items, cache): pass // Aggregate data for the report
+
+// --- Helper Functions (Placeholders, add Google AI init) ---
+Function initializeGoogleAIClient(api_key): pass // Use google.generativeai.configure(api_key=...)
+// ... other helpers remain largely the same ...
+Function prepareReportData(report_type, items, cache, google_client, model_name): pass // May need API client now
 
 // --- Entry Point ---
 if __name__ == "__main__":
