@@ -1,0 +1,44 @@
+# config.yaml
+
+# --- General Settings ---
+# These can be overridden by agent-specific settings below
+default_llm_settings:
+  temperature: 0.7       # Controls randomness (0 = deterministic, 1 = more creative)
+  # max_tokens: 4000     # Gemini often doesn't need explicit max_tokens set here
+
+# --- LLM Provider Configuration ---
+llm_provider:
+  type: "gemini"         # Specify we are using Gemini
+  # The actual API key will be loaded from the .env file
+  # model: "gemini-1.5-flash-latest" # Default model if not specified per agent
+  model: "gemini-pro"    # Using gemini-pro as a widely available default
+
+# --- Agent Definitions ---
+agents:
+  topic_researcher:      # Unique name for this agent configuration
+    role: "Senior Research Analyst"
+    goal: "Uncover foundational and cutting-edge information on a given topic."
+    backstory: |
+      You are an expert researcher with a knack for digging deep into subjects,
+      finding reliable sources, and synthesizing complex information into clear insights.
+      You are adept at using search tools to find relevant data.
+    tools: ["search_tools"] # Placeholder: List of tool names (we'll use a basic one later)
+    allow_delegation: false # Can this agent delegate tasks to others? (Keep false for simple examples)
+    verbose: true           # Log agent's thought process?
+    llm_config_override:    # Optional: Agent-specific LLM settings
+      temperature: 0.6      # Make researcher slightly more factual
+      model: "gemini-1.5-flash-latest" # Use a faster model for research
+
+  blog_post_writer:      # Unique name for another agent configuration
+    role: "Professional Content Writer"
+    goal: "Write engaging, informative, and well-structured blog posts based on provided research."
+    backstory: |
+      You are a skilled writer specializing in technology and AI topics. You transform
+      research notes and outlines into compelling narratives that are easy for a general
+      audience to understand.
+    tools: []               # This agent might not need external tools directly
+    allow_delegation: false
+    verbose: true
+    llm_config_override:
+      temperature: 0.8      # Allow more creativity for writing
+      model: "gemini-pro"   # Use a potentially more powerful model for writing quality
